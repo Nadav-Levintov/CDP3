@@ -57,7 +57,7 @@ int calc_initial_lower_bound(int citiesNum, int xCoord[], int yCoord[]);
 
 
 /*
-	Params: 
+	Params:
 		citiesNum - number of cities
 		current_path - pointer to array containing the indexes of the cities we already visited by order.
 		current_index - current index in the path array.
@@ -74,7 +74,7 @@ void branch_and_bound(int citiesNum, int *current_path, int current_index, int b
 	int lower_bound = bound, current_cost = initial_cost;
 
 	bool* visited = malloc(citiesNum * sizeof(bool));
-	memset(visited, 0, sizeof(visited));
+	memset(visited, false, sizeof(bool)*citiesNum);
 	for (int i = 0; i < current_index; i++)
 	{
 		visited[current_path[i]] = true;
@@ -94,31 +94,39 @@ void branch_and_bound(int citiesNum, int *current_path, int current_index, int b
 
 	for (int i = 0; i < citiesNum; i++)
 	{
-		if (adj_matrix[current_path[current_index - 1]][i] != 0 &&
-			visited[i] == false)
+		if (visited[i] == false)
 		{
 			int temp = lower_bound;
 			current_cost += adj_matrix[current_path[current_index - 1]][i];
+			/* This if is not relevent for us because we will call this function with a prefix, we 
+				need to use the first case when we build the prefix */
 			if (current_index == 1)
+			{
 				lower_bound -= ((firstMin(citiesNum, adj_matrix, current_path[current_index - 1]) +
 					firstMin(citiesNum, adj_matrix, i)) / 2);
+			}
 			else
+			{
 				lower_bound -= ((secondMin(citiesNum, adj_matrix, current_path[current_index - 1]) +
 					firstMin(citiesNum, adj_matrix, i)) / 2);
+			}
 
+			/* This is were we prune, if out current final res is better than the current cost we will not continue */
 			if (lower_bound + current_cost < *final_res)
 			{
 				current_path[current_index] = i;
 				visited[i] = true;
 
-				branch_and_bound(citiesNum, current_path, current_index + 1, lower_bound, current_cost, adj_matrix, final_res,final_path);
+				branch_and_bound(citiesNum, current_path, current_index + 1, lower_bound, current_cost,
+					adj_matrix, final_res, final_path);
 			}
 
+			/* Continue traversing the tree */
 			current_cost -= adj_matrix[current_path[current_index - 1]][i];
 			lower_bound = temp;
 
-			memset(visited, 0, sizeof(visited));
-			for (int j = 0; j <= current_index - 1; j++)
+			memset(visited, false, sizeof(bool)*citiesNum);
+			for (int j = 0; j < current_index; j++)
 				visited[current_path[j]] = true;
 
 		}
