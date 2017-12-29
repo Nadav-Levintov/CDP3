@@ -111,7 +111,7 @@ void branch_and_bound(int citiesNum, int *current_path, int current_index, int b
 					firstMin(citiesNum, adj_matrix, i)) / 2);
 			}
 
-			/* This is were we prune, if out current final res is better than the current cost we will not continue */
+			/* This is where we prune, if out current final res is better than the current cost we will not continue */
 			if (lower_bound + current_cost < *final_res)
 			{
 				current_path[current_index] = i;
