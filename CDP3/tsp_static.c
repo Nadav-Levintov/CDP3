@@ -1,4 +1,4 @@
-	#include <mpi.h>
+#include <mpi.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <limits.h>
@@ -298,7 +298,7 @@ void build_result_type(MPI_Datatype* message_type_ptr, int citiesNum) {
 	MPI_Aint displacements[2];
 	MPI_Datatype typelist[2];
 	MPI_Aint addresses[3];
-	
+
 	typelist[0] = MPI_INT;
 	typelist[1] = MPI_INT;
 
@@ -313,7 +313,7 @@ void build_result_type(MPI_Datatype* message_type_ptr, int citiesNum) {
 	displacements[1] = addresses[2] - addresses[0];
 
 	RUN_MPI_COMMAND(MPI_Type_struct(2, block_lengths, displacements, typelist, message_type_ptr));
-	
+
 	RUN_MPI_COMMAND(MPI_Type_commit(message_type_ptr));
 }
 
@@ -380,7 +380,7 @@ void doWork(void *data_ptr, int citiesNum, int prefix_length, int* final_best_co
 	memset(current_path, 0, citiesNum * sizeof(int));
 
 	branch_and_bound(data->citiesNum, current_path, data->prefix_length, current_bound, current_cost, adj_mat, res_cost, best_path);
-	
+
 	typedef RES_STRUCT Result;
 	Result res;
 	res.best_cost = res_cost;
@@ -422,7 +422,7 @@ void receiveAndDoWork() {
 	build_derived_type(&data, &my_type, citiesNum, prefix_length);
 	MPI_Status sts;
 	MPI_EXEC(MPI_Recv(&data, 1, my_type, 0, MY_TAG, MPI_COMM_WORLD, &sts));
-	doWork(&data,citiesNum, prefix_length,NULL,NULL);
+	doWork(&data, citiesNum, prefix_length, NULL, NULL);
 }
 
 int calc_initial_lower_bound(int citiesNum, int ** adj_matrix)
