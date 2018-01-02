@@ -11,15 +11,32 @@
                     printf("MPI_Error!\n"); \
                     MPI_Abort(MPI_COMM_WORLD, rc); }
 #define MY_TAG 555
-typedef struct {
-    int x;
-} Data;
+#define INIT_STRUCT struct { \
+    int citiesNum; \
+    int prefix_length; \
+    int num_of_prefixes; \
+    int xCoord[citiesNum]; \
+    int yCoord[citiesNum]; \
+    int first_prefix[prefix_length]; \
+};
 
 // Declarations
 // ------------
 void receiveAndDoWork();
 int calc_initial_lower_bound(int citiesNum, int xCoord[], int yCoord[]);
 int distributeAndCollect(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]);
+void
+distributeData(int citiesNum, int xCoord[], int yCoord[], int *prefix_root, int *res_length, int *num_of_root_prefix);
+
+void sendCitiesNum(int citiesNum, int processesNum);
+
+int calcPrefixLength(int citiesNum, int num_of_processes);
+
+int calcPrefixNum(int citiesNum, int prefix_length);
+
+void build_derived_type(MPI_Datatype *my_data, int citiesNum, int prefix_length);
+
+void next_prefix(int prefix[], int prefix_length, int citiesNum, int step_size);
 
 // Utils
 // ------------
@@ -140,7 +157,9 @@ int tsp_main(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]) {
 int distributeAndCollect(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]) {
     int prefix[citiesNum];
     memset(prefix, 0, sizeof(int) * citiesNum);
-    distributeData(citiesNum, xCoord, yCoord);
+    // int** adj_mat;
+    // create_adj_matrix(citiesNum, xCoord, yCoord, &adj_mat);
+    distributeData(citiesNum, xCoord, yCoord, NULL, NULL, NULL);
     Data data;
     calcFirstData(&data, citiesNum); // maybe inside distributeData?
     doWork(data);
@@ -149,11 +168,150 @@ int distributeAndCollect(int citiesNum, int xCoord[], int yCoord[], int shortest
     return result;
 }
 
+void
+distributeData(int citiesNum, int xCoord[], int yCoord[], int *prefix_root, int *res_length, int *num_of_root_prefix) {
+    int num_of_processes = 0, size = 0;
+    MPI_EXEC(MPI_Comm_size(MPI_COMM_WORLD, &num_of_processes));
+    sendCitiesNum(citiesNum, num_of_processes);
+    int prefix_length = calcPrefixLength(citiesNum, num_of_processes);
+    int num_of_prefixes = calcPrefixNum(citiesNum, prefix_length);
+    typedef INIT_STRUCT Data;
+    MPI_Datatype my_data;
+    build_derived_type(&my_data, citiesNum, prefix_length);
+
+    int prefix[prefix_length];
+    for (int i = 0; i < prefix_length; ++i) {
+        prefix[i] = i;
+    }
+    MPI_EXEC(MPI_Pack_size(1, my_data, MPI_COMM_WORLD, &size));
+    size += MPI_BSEND_OVERHEAD;
+    void* buf = malloc(size);
+    for (int i = 1; i < num_of_processes; ++i) {
+        Data data;
+        data.citiesNum = citiesNum;
+        data.num_of_prefixes = num_of_prefixes / num_of_processes;
+        if (i <= num_of_prefixes % num_of_processes) {
+            data.num_of_prefixes++;
+        }
+        data.prefix_length = prefix_length;
+        memmove(data.xCoord, xCoord, sizeof(int) * citiesNum);
+        memmove(data.yCoord, yCoord, sizeof(int) * citiesNum);
+        memmove(data.first_prefix, prefix, sizeof(int) * prefix_length);
+        MPI_EXEC(MPI_Buffer_attach(buf, size));
+        MPI_EXEC(MPI_Bsend(&data, 1, my_data, i, MY_TAG, MPI_COMM_WORLD));
+        MPI_EXEC(MPI_Buffer_detach(&buf, &size));
+        next_prefix(prefix, prefix_length, citiesNum, data.num_of_prefixes);
+    }
+    memmove(prefix_root, prefix, prefix_length);
+    *num_of_root_prefix = num_of_prefixes / num_of_processes;
+    *res_length = prefix_length;
+    free(buf);
+}
+
+// TODO: refactor this shit
+void next_prefix(int prefix[], int prefix_length, int citiesNum, int step_size) {
+    int currentCell = prefixLength - 1;
+    int alreadyAdvanced = 0;
+    int *cityMapping=(int*)malloc(sizeof(int)*(city_amount + 1));
+    for(int i=0; i<city_amount; i++){
+        cityMapping[i]=0;
+    }
+    for(int i=0; i<prefixLength; i++){
+        cityMapping[prefix[i]]=1;
+    }
+    while(alreadyAdvanced < advance_amount){
+        while(getNextCity(cityMapping,prefix[currentCell],city_amount,(prefix+currentCell)) == city_amount)
+        {
+            currentCell--;
+
+        }
+        while(currentCell<prefixLength-1)
+        {
+            currentCell++;
+            getNextCity(cityMapping,prefix[currentCell],city_amount,(prefix+currentCell));
+        }
+        alreadyAdvanced++;
+    }
+    free(cityMapping);
+}
+
+void build_derived_type(MPI_Datatype *my_data, int citiesNum, int prefix_length) {
+    typedef INIT_STRUCT Data;
+    Data data;
+
+    int block_length[6];
+    MPI_Aint displacements[6];
+    MPI_Datatype typelist[6];
+    MPI_Aint addresses[7];
+
+    for (int i = 0; i < 6; ++i) {
+        typelist[i] = MPI_INT;
+    }
+
+    block_length[0] = block_length[1] = block_length[2] = 1;
+    block_length[3] = block_length[4] = citiesNum;
+    block_length[5] = prefix_length;
+
+    MPI_EXEC(MPI_Address(&data, &addresses[0]));
+    MPI_EXEC(MPI_Address(&(data.citiesNum), &addresses[1]));
+    MPI_EXEC(MPI_Address(&(data.prefixSize), &addresses[2]));
+    MPI_EXEC(MPI_Address(&(data.prefixAmount), &addresses[3]));
+    MPI_EXEC(MPI_Address(&(data.xCoord), &addresses[4]));
+    MPI_EXEC(MPI_Address(&(data.yCoord), &addresses[5]));
+    MPI_EXEC(MPI_Address(&(data.firstPrefix), &addresses[6]));
+
+    for (int j = 0; j < 6; ++j) {
+        displacements[j] = addresses[j+1] - addresses[0];
+    }
+
+    MPI_EXEC(MPI_Type_struct(6, block_length, displacements, typelist, my_data));
+    MPI_EXEC(MPI_Type_commit(my_data));
+}
+
+int calcPrefixNum(int citiesNum, int prefix_length) {
+    int result = citiesNum - 1;
+    prefix_length -= 2;
+    citiesNum -= 2;
+    while (prefix_length > 0) {
+        result *= citiesNum;
+        prefix_length--;
+        citiesNum--;
+    }
+    return result;
+}
+
+int calcPrefixLength(int citiesNum, int num_of_processes) {
+    int result = 2, cities_count = citiesNum - 1;
+    int prefix_count = cities_count;
+    while (num_of_processes > prefix_count) {
+        if(result == citiesNum - 1) {
+            return result;
+        }
+        result++;
+        cities_count--;
+        prefix_count *= cities_count;
+    }
+    return result;
+}
+
+void sendCitiesNum(int citiesNum, int processesNum) {
+    int pack_size = 0;
+    MPI_EXEC(MPI_Pack_size(1, MPI_INT, MPI_COMM_WORLD, &size));
+    size += MPI_BSEND_OVERHEAD;
+    void* buf = malloc(size);
+    for (int i = 1; i < processesNum; ++i) {
+        MPI_EXEC(MPI_Buffer_attach(buf, size));
+        MPI_EXEC(MPI_Bsend(&citiesNum, 1, MPI_INT, i, MY_TAG, MPI_COMM_WORLD));
+        MPI_EXEC(MPI_Buffer_detach(&buf, &size));
+    }
+    free(buf);
+}
+
 void receiveAndDoWork() {
     int num_of_processes = 0;
     MPI_EXEC(MPI_Comm_size(MPI_COMM_WORLD, &num_of_processes));
     int citiesNum = getCitiesNum();
-    int currIndex = calcPrefixLength();
+    int currIndex = calcPrefixLength(citiesNum, num_of_processes);
     Data data;
     MPI_Datatype my_type;
     build_derived_type(&data, &my_type, citiesNum, currIndex);
