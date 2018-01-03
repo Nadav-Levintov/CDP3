@@ -50,20 +50,24 @@
 int tsp_main(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]);
 void recv_and_do_work();
 int recv_cities_num();
-int calc_initial_lower_bound(int* prefix, int prefix_length, int citiesNum, int **adj_matrix);
 int scatter_and_gather(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]);
 void
 scatter_data(int citiesNum, int xCoord[], int yCoord[], int *prefix_root, int *res_length, int *num_of_root_prefix);
 void send_cities_num(int citiesNum, int processesNum);
 int calc_length_of_prefix(int citiesNum, int num_of_processes);
 int calc_prefix_amount(int citiesNum, int prefix_length);
-void build_derived_type(MPI_Datatype *my_data, int citiesNum, int prefix_length);
-void next_prefix(int prefix[], int prefix_length, int citiesNum, int step_size);
-int next_city(int cityNum, int *prefixCell, int currentCity, bool *visited);
 void do_work(void *data_ptr, int citiesNum, int prefix_length, int *final_best_cost, int *final_best_path);
+void build_init_type(MPI_Datatype *my_data, int citiesNum, int prefix_length);
+void build_result_type(MPI_Datatype *message_type_ptr, int citiesNum);
+void gather_result(int citiesNum, int *final_best_cost, int *final_best_path, int best_cost, int *best_path);
+int next_city(int cityNum, int *prefixCell, int currentCity, bool *visited);
+void next_prefix(int prefix[], int prefix_length, int citiesNum, int step_size);
 int find_min(int citiesNum, int **adj, int curr_index);
 int find_second_min(int citiesNum, int **adj, int curr_index);
-void gather_result(int citiesNum, int *final_best_cost, int *final_best_path, int best_cost, int *best_path);
+int calc_initial_lower_bound(int* prefix, int prefix_length, int citiesNum, int **adj_matrix);
+void branch_and_bound(int citiesNum, int *current_path, int current_index, int bound, int initial_cost, int **adj_matrix,
+	int *final_res, int *final_path);
+void create_adj_matrix(int citiesNum, int xCoord[], int yCoord[], int ***adj_matrix);
 
 // Utils
 // ------------
@@ -217,7 +221,7 @@ scatter_data(int citiesNum, int xCoord[], int yCoord[], int *prefix_root, int *r
 	int num_of_prefixes = calc_prefix_amount(citiesNum, prefix_length);
 	typedef INIT_STRUCT Data;
 	MPI_Datatype my_data;
-	build_derived_type(&my_data, citiesNum, prefix_length);
+	build_init_type(&my_data, citiesNum, prefix_length);
 
 	int prefix[prefix_length];
 	for (int i = 0; i < prefix_length; ++i) {
@@ -290,7 +294,7 @@ int next_city(int citiesNum, int *prefix, int curr_city, bool *visited) {
 }
 
 /* build the main MPI datatype */
-void build_derived_type(MPI_Datatype *my_data, int citiesNum, int prefix_length) {
+void build_init_type(MPI_Datatype *my_data, int citiesNum, int prefix_length) {
     // build the data type just like in the tutorial
 	typedef INIT_STRUCT Data;
 	Data data;
@@ -487,7 +491,7 @@ void recv_and_do_work() {
 	typedef INIT_STRUCT Data;
 	Data data;
 	MPI_Datatype my_type;
-	build_derived_type(&my_type, citiesNum, prefix_length);
+	build_init_type(&my_type, citiesNum, prefix_length);
 	MPI_Status sts;
     // can't continue without this, so we use the blocking version
 	MPI_EXEC(MPI_Recv(&data, 1, my_type, 0, MY_TAG, MPI_COMM_WORLD, &sts));
