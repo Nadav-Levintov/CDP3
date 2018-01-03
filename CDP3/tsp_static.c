@@ -22,6 +22,7 @@
 												} \
 												PRINT("")
 
+/* Other Macros */
 #define CALC_DISTANCE(x1, y1, x2, y2) (1+(2*abs(x1-x2))+(2*abs(y1-y2)))
 #define MPI_EXEC(rc) if (rc != MPI_SUCCESS) { \
                     PRINT("MPI_Error!"); \
@@ -40,7 +41,6 @@
 #define RES_STRUCT struct{\
                             int cost;\
                             int path[citiesNum];}
-
 
 #define RES_STRUCT_ARR_SIZE 2
 
@@ -63,6 +63,7 @@ int next_city(int cityNum, int *prefixCell, int currentCity, bool *visited);
 void do_work(void *data_ptr, int citiesNum, int prefix_length, int *final_best_cost, int *final_best_path);
 int find_min(int citiesNum, int **adj, int curr_index);
 int find_second_min(int citiesNum, int **adj, int curr_index);
+void gather_result(int citiesNum, int *final_best_cost, int *final_best_path, int best_cost, int *best_path);
 
 // Utils
 // ------------
@@ -104,6 +105,7 @@ void create_adj_matrix(int citiesNum, int xCoord[], int yCoord[], int ***adj_mat
 }
 
 /*
+ * Branch and Bound function
 Params:
 citiesNum - number of cities
 current_path - pointer to array containing the indexes of the cities we already visited by order.
@@ -174,19 +176,19 @@ branch_and_bound(int citiesNum, int *current_path, int current_index, int bound,
 // The static parallel algorithm main function.
 int tsp_main(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]) {
 	int myRank;
-	MPI_EXEC(MPI_Comm_rank(MPI_COMM_WORLD, &myRank));
+	MPI_EXEC(MPI_Comm_rank(MPI_COMM_WORLD, &myRank)); // get my MPI rank
 	if (myRank == 0) {
 		// distribute the data, do work, and collect the result
 		int result = scatter_and_gather(citiesNum, xCoord, yCoord, shortestPath);
 		return result;
 	}
 	else {
-		// calculate partial result and send to CPU 0
+		// calculate partial result and send to first process
 		recv_and_do_work();
 	}
 	return -1;
 }
-
+/* sends prefixes to all, and collects the final result */
 int scatter_and_gather(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]) {
 	int prefix[citiesNum];
 	int prefix_length = 0, num_of_prefixes = 0;
@@ -205,10 +207,11 @@ int scatter_and_gather(int citiesNum, int xCoord[], int yCoord[], int shortestPa
 	return result;
 }
 
+/* sends the number of cities, and then sends the rest of the data */
 void
 scatter_data(int citiesNum, int xCoord[], int yCoord[], int *prefix_root, int *res_length, int *num_of_root_prefix) {
 	int num_of_processes = 0, size = 0;
-	MPI_EXEC(MPI_Comm_size(MPI_COMM_WORLD, &num_of_processes));
+	MPI_EXEC(MPI_Comm_size(MPI_COMM_WORLD, &num_of_processes)); // get the number of processes
 	send_cities_num(citiesNum, num_of_processes);
 	int prefix_length = calc_length_of_prefix(citiesNum, num_of_processes);
 	int num_of_prefixes = calc_prefix_amount(citiesNum, prefix_length);
@@ -220,7 +223,7 @@ scatter_data(int citiesNum, int xCoord[], int yCoord[], int *prefix_root, int *r
 	for (int i = 0; i < prefix_length; ++i) {
 		prefix[i] = i;
 	}
-	MPI_EXEC(MPI_Pack_size(1, my_data, MPI_COMM_WORLD, &size));
+	MPI_EXEC(MPI_Pack_size(1, my_data, MPI_COMM_WORLD, &size)); // get ready for send
 	size += MPI_BSEND_OVERHEAD;
 	void *buf = malloc(size);
 	for (int i = 1; i < num_of_processes; ++i) {
@@ -233,6 +236,7 @@ scatter_data(int citiesNum, int xCoord[], int yCoord[], int *prefix_root, int *r
 		memmove(data.xCoord, xCoord, sizeof(int) * citiesNum);
 		memmove(data.yCoord, yCoord, sizeof(int) * citiesNum);
 		memmove(data.first_prefix, prefix, sizeof(int) * prefix_length);
+        // send and return as soon as possible, so use buffer (using point to point for initial data)
 		MPI_EXEC(MPI_Buffer_attach(buf, size));
 		MPI_EXEC(MPI_Bsend(&data, 1, my_data, i, MY_TAG, MPI_COMM_WORLD));
 		MPI_EXEC(MPI_Buffer_detach(&buf, &size));
@@ -245,6 +249,7 @@ scatter_data(int citiesNum, int xCoord[], int yCoord[], int *prefix_root, int *r
 	free(buf);
 }
 
+/* gets a prefix and calculates the next prefix according to the given step size */
 void next_prefix(int prefix[], int prefix_length, int citiesNum, int step_size) {
 	int curr = prefix_length - 1, advanced = 0;
 	bool *visited = malloc(sizeof(bool) * (citiesNum + 1));
@@ -268,6 +273,7 @@ void next_prefix(int prefix[], int prefix_length, int citiesNum, int step_size) 
 	free(visited);
 }
 
+/* gets a city and returns the next unvisited city */
 int next_city(int citiesNum, int *prefix, int curr_city, bool *visited) {
 	visited[curr_city] = false;
 	curr_city = (curr_city + 1) % (citiesNum + 1);
@@ -283,7 +289,9 @@ int next_city(int citiesNum, int *prefix, int curr_city, bool *visited) {
 	return curr_city;
 }
 
+/* build the main MPI datatype */
 void build_derived_type(MPI_Datatype *my_data, int citiesNum, int prefix_length) {
+    // build the data type just like in the tutorial
 	typedef INIT_STRUCT Data;
 	Data data;
 
@@ -314,8 +322,9 @@ void build_derived_type(MPI_Datatype *my_data, int citiesNum, int prefix_length)
 	MPI_EXEC(MPI_Type_create_struct(INIT_STRUCT_ARR_SIZE, lengths, disp, types, my_data));
 	MPI_EXEC(MPI_Type_commit(my_data));
 }
-
+/* build the result MPI datatype */
 void build_result_type(MPI_Datatype *message_type_ptr, int citiesNum) {
+    // build the data type just like in the tutorial
 	typedef RES_STRUCT processResult;
 	processResult res_data;
 
@@ -341,6 +350,7 @@ void build_result_type(MPI_Datatype *message_type_ptr, int citiesNum) {
 	MPI_EXEC(MPI_Type_commit(message_type_ptr));
 }
 
+/* calculates the number if prefixes according to the number of cities */
 int calc_prefix_amount(int citiesNum, int prefix_length) {
 	int result = citiesNum - 1;
 	prefix_length -= 2;
@@ -353,6 +363,7 @@ int calc_prefix_amount(int citiesNum, int prefix_length) {
 	return result;
 }
 
+/* calculates the length of each prefix according to the number of cities */
 int calc_length_of_prefix(int citiesNum, int num_of_processes) {
 	int result = 2, cities_count = citiesNum - 1;
 	int prefix_count = cities_count;
@@ -367,13 +378,14 @@ int calc_length_of_prefix(int citiesNum, int num_of_processes) {
 	return result;
 }
 
+/* sends the number of cities to rest of processes */
 void send_cities_num(int citiesNum, int processesNum) {
-
 	int pack_size = 0;
 	MPI_EXEC(MPI_Pack_size(1, MPI_INT, MPI_COMM_WORLD, &pack_size));
 	pack_size += MPI_BSEND_OVERHEAD;
 	void *buf = malloc(pack_size);
 	for (int i = 1; i < processesNum; ++i) {
+        // send and return as soon as possible, so use buffer (using point to point for initial data)
 		MPI_EXEC(MPI_Buffer_attach(buf, pack_size));
 		MPI_EXEC(MPI_Bsend(&citiesNum, 1, MPI_INT, i, MY_TAG, MPI_COMM_WORLD));
 		MPI_EXEC(MPI_Buffer_detach(&buf, &pack_size));
@@ -381,13 +393,16 @@ void send_cities_num(int citiesNum, int processesNum) {
 	free(buf);
 }
 
+/* receives the number of cities from the first process */
 int recv_cities_num() {
 	int citiesNum;
 	MPI_Status sts;
+    // can't continue without this, so we use the blocking version
 	MPI_EXEC(MPI_Recv(&citiesNum, 1, MPI_INT, 0, MY_TAG, MPI_COMM_WORLD, &sts));
 	return citiesNum;
 }
 
+/* calculate the cost of the given prefix */
 int calc_initial_cost(int prefix_length, int** adj_mat, int* prefix) {
 	int cost = 0;
 	for (int i = 0; i < prefix_length - 1; i++)
@@ -397,12 +412,14 @@ int calc_initial_cost(int prefix_length, int** adj_mat, int* prefix) {
 	return cost;
 }
 
+/* calculate the best path according to a given prefixes, and sends the result back to the main process*/
 void do_work(void *data_ptr, int citiesNum, int prefix_length, int *final_best_cost, int *final_best_path) {
 	typedef INIT_STRUCT Data;
 	Data *data = (Data *)data_ptr;
 
 	int **adj_mat;
 	create_adj_matrix(citiesNum, data->xCoord, data->yCoord, &adj_mat);
+    // need to wait so all processes will get the initial data (as written in the exercise)
 	MPI_EXEC(MPI_Barrier(MPI_COMM_WORLD));
 	int best_cost = INT_MAX;
 	int best_path[citiesNum];
@@ -428,37 +445,40 @@ void do_work(void *data_ptr, int citiesNum, int prefix_length, int *final_best_c
 		}
 		next_prefix(data->first_prefix, prefix_length, citiesNum, 1);
 	}
-	typedef RES_STRUCT Result;
-	Result res;
-	res.cost = best_cost;
-	memmove(res.path, best_path, sizeof(int) * citiesNum);
-	MPI_Datatype my_res;
-	build_result_type(&my_res, citiesNum);
-	int rank = 0, num_of_processes = 0;
-	MPI_EXEC(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
-	MPI_EXEC(MPI_Comm_size(MPI_COMM_WORLD, &num_of_processes));
-	Result *resultsArray = NULL;
-	if (rank == 0) {
+    gather_result(citiesNum, final_best_cost, final_best_path, best_cost, best_path);
+}
+
+/* gathers the partial results and calculates the best one */
+void gather_result(int citiesNum, int *final_best_cost, int *final_best_path, int best_cost, int *best_path) {
+    typedef RES_STRUCT Result;
+    Result res;
+    res.cost = best_cost;
+    memmove(res.path, best_path, sizeof(int) * citiesNum);
+    MPI_Datatype my_res;
+    build_result_type(&my_res, citiesNum);
+    int rank = 0, num_of_processes = 0;
+    MPI_EXEC(MPI_Comm_rank(MPI_COMM_WORLD, &rank)); // my rank
+    MPI_EXEC(MPI_Comm_size(MPI_COMM_WORLD, &num_of_processes)); // number of processes
+    Result *resultsArray = NULL;
+    if (rank == 0) {
 		resultsArray = (Result *)malloc(sizeof(Result) * (num_of_processes));
 	}
-
-	MPI_EXEC(MPI_Gather(&res, 1, my_res, resultsArray, 1, my_res, 0, MPI_COMM_WORLD));
-
-	if (rank == 0) {
+    // gather the result from all processes to the first process
+    MPI_EXEC(MPI_Gather(&res, 1, my_res, resultsArray, 1, my_res, 0, MPI_COMM_WORLD));
+    if (rank == 0) {
 		int bestIndex = 0;
 		for (int i = 0; i < num_of_processes; i++) {
 			if (resultsArray[i].cost < resultsArray[bestIndex].cost) {
 				bestIndex = i;
 			}
 		}
-
 		*final_best_cost = resultsArray[bestIndex].cost;
 		memmove(final_best_path, resultsArray[bestIndex].path, citiesNum * sizeof(int));
 		free(resultsArray);
 	}
 }
 
-
+/* gets number of cities and prefixes, and calculates partial result*/
 void recv_and_do_work() {
 	int num_of_processes = 0;
 	MPI_EXEC(MPI_Comm_size(MPI_COMM_WORLD, &num_of_processes));
@@ -469,10 +489,12 @@ void recv_and_do_work() {
 	MPI_Datatype my_type;
 	build_derived_type(&my_type, citiesNum, prefix_length);
 	MPI_Status sts;
+    // can't continue without this, so we use the blocking version
 	MPI_EXEC(MPI_Recv(&data, 1, my_type, 0, MY_TAG, MPI_COMM_WORLD, &sts));
 	do_work(&data, citiesNum, prefix_length, NULL, NULL);
 }
 
+/* calculate the lower bound given a prefix */
 int calc_initial_lower_bound(int* prefix, int prefix_length, int citiesNum, int **adj_matrix) {
 	int bound = 0;
 	for (int i = 0; i < citiesNum; i++) {
