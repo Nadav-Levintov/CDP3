@@ -30,6 +30,11 @@
                     MPI_Abort(MPI_COMM_WORLD, rc); }
 
 #define MY_TAG 555
+#define TAG_KILL 556
+#define TAG_WORKER_RES 557
+#define TAG_NEW_BEST_COST 558
+#define TAG_ABORT_LISTENING 559
+#define TAG_NEW_JOB 560
 #define DYANAMIC_WORKER_FACTOR 10
 
 #define INIT_STRUCT struct { \
@@ -53,11 +58,10 @@
 #define JOB_STRUCT_ARR_SIZE 2
 
 #define WOKER_RES_STRUCT struct{\
-								int flag_copy_buffer;/* do we need this?*/\
 								int rank;\
 								int res_cost;\
 								int res_path[citiesNum];}
-#define JOB_STRUCT_ARR_SIZE 4
+#define JOB_STRUCT_ARR_SIZE 3
 
 /* function declaretions */
 
@@ -274,10 +278,10 @@ int next_city(int citiesNum, int *prefix, int curr_city, bool *visited) {
 	return curr_city;
 }
 
-int master_func(int citiesNum, int * shortestPath, int num_of_workers)
+int master_func(int citiesNum, int * shortestPath, int num_of_proccesses)
 {
-
-	int initial_prefix_length = calc_length_of_prefix(citiesNum, num_of_workers*DYANAMIC_WORKER_FACTOR);
+	int num_of_workers = num_of_proccesses - 1;
+	int initial_prefix_length = calc_length_of_prefix(citiesNum, num_of_workers * DYANAMIC_WORKER_FACTOR);
 	int num_of_prefixes = calc_prefix_amount(citiesNum, initial_prefix_length);
 
 	int current_prefix[citiesNum];
@@ -290,10 +294,10 @@ int master_func(int citiesNum, int * shortestPath, int num_of_workers)
 	typedef JOB_STRUCT Job;
 	MPI_Datatype job_type;
 	build_MPI_JobAssignment_type(&job_type, initial_prefix_length);
-	Job worker_jobs_arr[num_of_workers];
-	int active_workers = num_of_workers - 1;
+	Job worker_jobs_arr[num_of_proccesses];
 
-	for (int i = 1; i < num_of_workers; i++) {
+	//starting from 1 because 0 is master
+	for (int i = 1; i < num_of_proccesses; i++) {
 		if (num_of_prefixes <= 0)
 		{
 			PRINT("Master,if (num_of_prefixes <= 0), should not enter this ");
@@ -315,28 +319,42 @@ int master_func(int citiesNum, int * shortestPath, int num_of_workers)
 	int res_path[citiesNum];
 	memset(res_path, 0, citiesNum * sizeof(int));
 	MPI_Status status;
-	typedef WOKER_RESULT_STRUCT WorkerRsult;
-	WorkerRsult workerResult;
-	MPI_Datatype WorkerRsult_type;
-	build_MPI_WorkerResult_type(&WorkerRsult_type, citiesNum);
-	if (!jumpToEnd) {
-		while (!finishedAllPrefixes) {
-			MPI_EXEC(MPI_Recv(&workerResult, 1, WorkerRsult_type, MPI_ANY_SOURCE, TAG_WORKER_RESULT, COMM, &status));
-			if (workerResult.bestWeight < res_cost && workerResult.flag_copy_buffer)
-			{
-				res_cost = workerResult.bestWeight;
-				copy_array(workerResult.betsPath, res_path, citiesNum);
-			}
-			jobAssignment next_job;
-			next_job.prefixLength = prefixLen;
-			copy_array(currentPrefix, next_job.prefix, prefixLen);
-			MPI_Ssend(&next_job, 1, jobAssignment_type, workerResult.rank, TAG_NEW_JOB, COMM);
-			advance_prefix(currentPrefix, prefixLen, citiesNum, 1, &finishedAllPrefixes);
+	typedef WOKER_RES_STRUCT Res;
+	Res worker_res;
+	MPI_Datatype Res_type;
+	build_worker_res_type(&Res_type, citiesNum);
+	Job next_job;
+	while (num_of_prefixes) {
+		MPI_EXEC(MPI_Recv(&worker_res, 1, Res_type, MPI_ANY_SOURCE, TAG_WORKER_RESULT, MPI_COMM_WORLD, &status));
+		if (worker_res.res_cost < res_cost)
+		{
+			res_cost = worker_res.res_cost;
+			memmove(res_path, worker_res.res_path, citiesNum * sizeof(int));
 		}
+		next_job.prefix_length = initial_prefix_length;
+		memmove(next_job.prefix, current_prefix, sizeof(int) * initial_prefix_length);
+		MPI_Ssend(&next_job, 1, job_type, worker_res.rank, TAG_NEW_JOB, MPI_COMM_WORLD);
+		next_prefix(current_prefix, initial_prefix_length, citiesNum, 1);
+		num_of_prefixes--;
 	}
 
+	while (num_of_workers > 0) {
+		MPI_EXEC(MPI_Recv(&worker_res, 1, Res_type, MPI_ANY_SOURCE, TAG_WORKER_RESULT, MPI_COMM_WORLD, &status));
+		if (worker_res.res_cost < res_cost)
+		{
+			res_cost = worker_res.res_cost;
+			memmove(res_path, worker_res.res_path, citiesNum * sizeof(int));
+		}
+		num_of_workers--;
+	}
 
-	return 0;
+	//We have all results, lets kill worker proccess, stating from 1 because 0 is master
+	for (int i = 1; i < num_of_proccesses; i++) {
+		MPI_Ssend(&next_job, 1, job_type, i, TAG_KILL, MPI_COMM_WORLD);
+	}
+	memmove(shortestPath, res_path, sizeof(int) * citiesNum);
+
+	return res_cost;
 }
 
 void worker_func(int citiesNum, int ** adj_matrix)
@@ -399,37 +417,32 @@ void build_job_type(MPI_Datatype* message_type_ptr, int citiesNum) {
 	MPI_EXEC(MPI_Type_commit(message_type_ptr));
 }
 
-void build_MPI_WorkerResult_type(MPI_Datatype* message_type_ptr, int citiesNum) {
+void build_worker_res_type(MPI_Datatype* message_type_ptr, int citiesNum) {
 	typedef WOKER_RES_STRUCT Worker_Res;
 	Worker_Res res;
 	int lengths[JOB_STRUCT_ARR_SIZE];
 	MPI_Aint disp[JOB_STRUCT_ARR_SIZE];
 	MPI_Datatype types[JOB_STRUCT_ARR_SIZE];
-	MPI_Aint addrs[JOB_STRUCT_ARR_SIZE+1];
-	
+	MPI_Aint addrs[JOB_STRUCT_ARR_SIZE + 1];
+
 	for (int i = 0; i < JOB_STRUCT_ARR_SIZE; i++)
 	{
 		types[i] = MPI_INT;
 	}
 
-	// Specify the number of elements of each type
-	lengths[0] = lengths[1] = lengths[2] = 1;
-	lengths[3] = citiesNum;
+	lengths[0] = lengths[1] = 1;
+	lengths[2] = citiesNum;
 
-	// Calculate the displacements of the members
-	//relative to indata
 	MPI_EXEC(MPI_Get_address(&res, &addrs[0]));
-	MPI_EXEC(MPI_Get_address(&(res.flag_copy_buffer), &addrs[1]));
-	MPI_EXEC(MPI_Get_address(&(res.rank), &addrs[2]));
-	MPI_EXEC(MPI_Get_address(&(res.res_cost), &addrs[3]));
-	MPI_EXEC(MPI_Get_address(&(res.res_path), &addrs[4]));
+	MPI_EXEC(MPI_Get_address(&(res.rank), &addrs[1]));
+	MPI_EXEC(MPI_Get_address(&(res.res_cost), &addrs[2]));
+	MPI_EXEC(MPI_Get_address(&(res.res_path), &addrs[3]));
 
 	disp[0] = addrs[1] - addrs[0];
 	disp[1] = addrs[2] - addrs[0];
 	disp[2] = addrs[3] - addrs[0];
-	disp[3] = addrs[4] - addrs[0];
-	// Create the derived type
-	MPI_EXEC(MPI_Type_create_struct(4, lengths, disp, types, message_type_ptr));
-	// Commit it so that it can be used
+
+	MPI_EXEC(MPI_Type_create_struct(JOB_STRUCT_ARR_SIZE, lengths, disp, types, message_type_ptr));
+
 	MPI_EXEC(MPI_Type_commit(message_type_ptr));
 }
