@@ -300,7 +300,7 @@ int master_func(int citiesNum, int * shortestPath, int num_of_proccesses)
 	for (int i = 1; i < num_of_proccesses; i++) {
 		if (num_of_prefixes <= 0)
 		{
-			PRINT("Master,if (num_of_prefixes <= 0), should not enter this ");
+			PRINT("Master process: if (num_of_prefixes <= 0), should not enter this ");
 			assert(0);
 		}
 
