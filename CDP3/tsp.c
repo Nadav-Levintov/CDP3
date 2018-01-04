@@ -37,7 +37,7 @@
 #define TAG_WORKER_RES 557
 #define TAG_NEW_BEST_COST 558
 #define TAG_NEW_JOB 559
-#define DYANAMIC_WORKER_FACTOR 10
+#define DYANAMIC_WORKER_FACTOR 100
 
 #define JOB_STRUCT struct{\
                             int is_valid; \
@@ -86,6 +86,7 @@ void build_cost_type(MPI_Datatype *cost_type);
 int calc_initial_cost(int prefix_length, int **adj_mat, int *prefix);
 void build_job_type(MPI_Datatype *message_type_ptr, int citiesNum);
 void build_worker_res_type(MPI_Datatype *worker_res_type, int citiesNum);
+void free_adj_matrix(int citiesNum, int ***adj_matrix);
 // Utils
 // ------------
 
@@ -129,6 +130,13 @@ void create_adj_matrix(int citiesNum, int xCoord[], int yCoord[], int ***adj_mat
             (*adj_matrix)[i][j] = (i == j) ? 0 : CALC_DISTANCE(xCoord[i], yCoord[i], xCoord[j], yCoord[j]);
         }
     }
+}
+
+void free_adj_matrix(int citiesNum, int ***adj_matrix) {
+    for (int i = 0; i < citiesNum; i++) {
+        free((*adj_matrix)[i]);
+    }
+    free(*adj_matrix);
 }
 
 /*
@@ -197,6 +205,7 @@ branch_and_bound(int citiesNum, int *current_path, int current_index, int bound,
                 visited[current_path[j]] = true;
         }
     }
+    free(visited);
 }
 
 /* calculate the lower bound given a prefix */
@@ -232,10 +241,10 @@ int tsp_main(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]) {
 
     int **adj_matrix;
     create_adj_matrix(citiesNum, xCoord, yCoord, &adj_matrix);
-
     MPI_EXEC(MPI_Comm_rank(MPI_COMM_WORLD, &myRank));
     if (myRank == 0) {
         int result = master_func(citiesNum, shortestPath, num_of_processes);
+        free_adj_matrix(citiesNum, &adj_matrix);
         return result;
     } else {
         worker_func(citiesNum, adj_matrix, num_of_processes);
@@ -288,7 +297,9 @@ int next_city(int citiesNum, int *prefix, int curr_city, bool *visited) {
 
 int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
     int num_of_workers = 0;
-    int initial_prefix_length = calc_length_of_prefix(citiesNum, num_of_workers * DYANAMIC_WORKER_FACTOR);
+    int initial_prefix_length = calc_length_of_prefix(citiesNum, num_of_workers * 1);
+    //initial_prefix_length += 4;
+    //initial_prefix_length = initial_prefix_length > citiesNum ? citiesNum : initial_prefix_length;
     int num_of_prefixes = calc_prefix_amount(citiesNum, initial_prefix_length);
 
     int current_prefix[citiesNum];
@@ -300,7 +311,7 @@ int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
 
     typedef JOB_STRUCT Job;
     MPI_Datatype job_type;
-    build_job_type(&job_type, initial_prefix_length);
+    build_job_type(&job_type, citiesNum);
     Job worker_jobs_arr[num_of_proccesses];
 
     //starting from 1 because 0 is master
@@ -343,10 +354,8 @@ int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
         next_prefix(current_prefix, initial_prefix_length, citiesNum, 1);
         num_of_prefixes--;
     }
-    num_of_workers--;
-    PRINT("0");
+
     while (num_of_workers > 0) {
-        //PRINT("01");
         MPI_EXEC(MPI_Recv(&worker_res, 1, Res_type, MPI_ANY_SOURCE, TAG_WORKER_RES, MPI_COMM_WORLD, &status));
         if (worker_res.res_cost < res_cost) {
             res_cost = worker_res.res_cost;
@@ -354,12 +363,10 @@ int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
         }
         num_of_workers--;
     }
-    PRINT("1");
+
     for (int i = 1; i < num_of_proccesses; i++) {
-        PRINT1("", i);
         MPI_EXEC(MPI_Ssend(&next_job, 1, job_type, i, TAG_KILL, MPI_COMM_WORLD));
     }
-    PRINT("2");
     memmove(shortestPath, res_path, sizeof(int) * citiesNum);
 
     return res_cost;
@@ -437,7 +444,6 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
     Job job;
     Cost cost;
     Res res;
-
     int send_buffer_size = 0;
     MPI_EXEC(MPI_Pack_size(1, cost_type, MPI_COMM_WORLD, &send_buffer_size));
     send_buffer_size += MPI_BSEND_OVERHEAD;
@@ -459,7 +465,9 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
             int tmp_cost = my_lowest_cost;
             branch_and_bound(citiesNum, job.prefix, job.prefix_length, current_bound, current_cost, adj_matrix,
                              &tmp_cost, shortest_path);
+
             checkForBetterResult(&my_lowest_cost);
+
             if(tmp_cost < my_lowest_cost) {
                 // found better result than the rest
                 my_lowest_cost = tmp_cost;
@@ -468,17 +476,14 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
             } else {
                 my_result_cost = INT_MAX;
             }
+
             res.res_cost = my_result_cost;
             if (my_result_cost < INT_MAX) {
-                PRINTP("res.res_path", res.res_path);
-                PRINTP("shortest_path", shortest_path);
-                PRINT1("citiesNum", citiesNum);
                 memmove(res.res_path, shortest_path, citiesNum * sizeof(int));
             }
             res.rank = rank;
             MPI_EXEC(MPI_Ssend(&res, 1, worker_res_type, 0, TAG_WORKER_RES, MPI_COMM_WORLD));
         }
-
         bool received_new_job = false;
         while (!received_new_job) {
             MPI_Status status;
@@ -491,7 +496,6 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
                         my_result_cost = INT_MAX;
                         my_lowest_cost = cost.cost;
                     }
-
                     break;
                 case TAG_NEW_JOB:
                     MPI_EXEC(MPI_Recv(&job, 1, job_type, 0, TAG_NEW_JOB, MPI_COMM_WORLD, &status));
@@ -502,10 +506,10 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
                     MPI_EXEC(MPI_Recv(&job, 1, job_type, 0, TAG_KILL, MPI_COMM_WORLD, &status));
                     received_new_job = true;
                     process_alive = false;
-
                     break;
                 default:
                     MPI_EXEC(MPI_Recv(&cost, 1, cost_type, MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, &status));
+                    job.is_valid = 0;
                     break;
             }
         }
