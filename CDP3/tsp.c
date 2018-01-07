@@ -86,7 +86,7 @@ int calc_prefix_amount(int citiesNum, int prefix_length);
 void build_cost_type(MPI_Datatype *cost_type);
 
 int calc_initial_cost(int prefix_length, int **adj_mat, int *prefix);
-void build_job_type(MPI_Datatype *message_type_ptr, int citiesNum);
+void build_job_type(MPI_Datatype *job_type, int citiesNum);
 void build_worker_res_type(MPI_Datatype *worker_res_type, int citiesNum);
 void free_adj_matrix(int citiesNum, int ***adj_matrix);
 void checkForBetterResult(int *my_lowest_cost);
@@ -224,17 +224,17 @@ int calc_initial_lower_bound(int *prefix, int prefix_length, int citiesNum, int 
 }
 
 
-// The dynamic parellel algorithm main function.
+// The dynamic parallel algorithm main function.
 int tsp_main(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]) {
 	int myRank, num_of_processes = 0;
-	MPI_EXEC(MPI_Comm_size(MPI_COMM_WORLD, &num_of_processes));
+	MPI_EXEC(MPI_Comm_size(MPI_COMM_WORLD, &num_of_processes)); // get the number of processes
 	if (num_of_processes < 2) {
 		return -1;
 	}
 
 	int **adj_matrix;
 	create_adj_matrix(citiesNum, xCoord, yCoord, &adj_matrix);
-	MPI_EXEC(MPI_Comm_rank(MPI_COMM_WORLD, &myRank));
+	MPI_EXEC(MPI_Comm_rank(MPI_COMM_WORLD, &myRank)); // get my MPI rank
 	if (myRank == 0) {
 		int result = master_func(citiesNum, shortestPath, num_of_processes);
 		free_adj_matrix(citiesNum, &adj_matrix);
@@ -242,6 +242,7 @@ int tsp_main(int citiesNum, int xCoord[], int yCoord[], int shortestPath[]) {
 	}
 	else {
 		worker_func(citiesNum, adj_matrix, num_of_processes);
+        free_adj_matrix(citiesNum, &adj_matrix);
 	}
 	return -1;
 }
@@ -281,6 +282,7 @@ int next_city(int citiesNum, int *prefix, int curr_city, bool *visited) {
 	return curr_city;
 }
 
+/* master process main function */
 int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
 	int num_of_workers = 0;
 	int initial_prefix_length = calc_length_of_prefix(citiesNum, (num_of_proccesses - 1) * DYANAMIC_WORKER_FACTOR);
@@ -295,14 +297,14 @@ int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
 		visited[i] = true;
 	}
 
-
+    // creating the job data struct
 	typedef JOB_STRUCT Job;
 	MPI_Datatype job_type;
 	build_job_type(&job_type, citiesNum);
 	Job worker_jobs_arr[num_of_proccesses];
 
-
-	//starting from 1 because 0 is master
+    // building starting jobs
+	// starting from 1 because 0 is master
 	for (int i = 1; i < num_of_proccesses; i++) {
 		if (num_of_prefixes == 0) {
 			worker_jobs_arr[i].is_valid = 0;
@@ -316,6 +318,7 @@ int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
 		num_of_workers++;
 	}
 
+    // sending initial jobs to all processes
 	Job dummy_job;
 	MPI_EXEC(MPI_Scatter(worker_jobs_arr, 1, job_type, &dummy_job, 1, job_type, 0, MPI_COMM_WORLD));
 
@@ -328,9 +331,12 @@ int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
 	MPI_Datatype Res_type;
 	build_worker_res_type(&Res_type, citiesNum);
 	Job next_job;
+    // receiving results and sending new jobs until we finish all the prefixes
 	while (num_of_prefixes) {
+        // receiving parial result
 		MPI_EXEC(MPI_Recv(&worker_res, 1, Res_type, MPI_ANY_SOURCE, TAG_WORKER_RES, MPI_COMM_WORLD, &status));
 		if (worker_res.res_cost < res_cost) {
+            // updating best result
 			res_cost = worker_res.res_cost;
 			memmove(res_path, worker_res.res_path, citiesNum * sizeof(int));
 		}
@@ -338,17 +344,20 @@ int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
 		next_job.is_valid = 1;
 		next_job.prefix_length = initial_prefix_length;
 		memmove(next_job.prefix, current_prefix, sizeof(int) * initial_prefix_length);
+        // sending new job, the process we send to is waiting for us
 		MPI_Ssend(&next_job, 1, job_type, worker_res.rank, TAG_NEW_JOB, MPI_COMM_WORLD);
 		next_prefix(current_prefix, initial_prefix_length, citiesNum, 1, visited);
 		num_of_prefixes--;
 	}
 
+    // waiting for last result from all of the processes
 	while (num_of_workers > 0) {
 		MPI_EXEC(MPI_Recv(&worker_res, 1, Res_type, MPI_ANY_SOURCE, TAG_WORKER_RES, MPI_COMM_WORLD, &status));
 		if (worker_res.res_cost < res_cost) {
 			res_cost = worker_res.res_cost;
 			memmove(res_path, worker_res.res_path, citiesNum * sizeof(int));
 		}
+        // after we received the last result from a process, we send him a job with the tag that tells him to finish
 		MPI_EXEC(MPI_Ssend(&next_job, 1, job_type, worker_res.rank, TAG_KILL, MPI_COMM_WORLD));
 		num_of_workers--;
 	}
@@ -358,9 +367,11 @@ int master_func(int citiesNum, int *shortestPath, int num_of_proccesses) {
 	return res_cost;
 }
 
-void build_job_type(MPI_Datatype *message_type_ptr, int citiesNum) {
+/* build the job datatype */
+void build_job_type(MPI_Datatype *job_type, int citiesNum) {
+    // build the data type just like in the tutorial
 	typedef JOB_STRUCT Job;
-	Job innerData;
+	Job job;
 
 	int lengths[JOB_STRUCT_ARR_SIZE];
 	MPI_Aint disp[JOB_STRUCT_ARR_SIZE];
@@ -374,20 +385,22 @@ void build_job_type(MPI_Datatype *message_type_ptr, int citiesNum) {
 	lengths[2] = citiesNum;
 
 
-	MPI_EXEC(MPI_Get_address(&innerData, &addrs[0]));
-	MPI_EXEC(MPI_Get_address(&(innerData.is_valid), &addrs[1]));
-	MPI_EXEC(MPI_Get_address(&(innerData.prefix_length), &addrs[2]));
-	MPI_EXEC(MPI_Get_address(&(innerData.prefix), &addrs[3]));
+	MPI_EXEC(MPI_Get_address(&job, &addrs[0]));
+	MPI_EXEC(MPI_Get_address(&(job.is_valid), &addrs[1]));
+	MPI_EXEC(MPI_Get_address(&(job.prefix_length), &addrs[2]));
+	MPI_EXEC(MPI_Get_address(&(job.prefix), &addrs[3]));
 
 	for (int i = 0; i < JOB_STRUCT_ARR_SIZE; ++i) {
 		disp[i] = addrs[i + 1] - addrs[0];
 	}
-	MPI_EXEC(MPI_Type_create_struct(JOB_STRUCT_ARR_SIZE, lengths, disp, types, message_type_ptr));
+	MPI_EXEC(MPI_Type_create_struct(JOB_STRUCT_ARR_SIZE, lengths, disp, types, job_type));
 
-	MPI_EXEC(MPI_Type_commit(message_type_ptr));
+	MPI_EXEC(MPI_Type_commit(job_type));
 }
 
+/* build the the worker's result datatype */
 void build_worker_res_type(MPI_Datatype *worker_res_type, int citiesNum) {
+    // build the data type just like in the tutorial
 	typedef WORKER_RES_STRUCT Worker_Res;
 	Worker_Res res;
 	int lengths[WORKER_RES_STRUCT_ARR_SIZE];
@@ -416,10 +429,12 @@ void build_worker_res_type(MPI_Datatype *worker_res_type, int citiesNum) {
 	MPI_EXEC(MPI_Type_commit(worker_res_type));
 }
 
+/* main worker function */
 void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
 	int rank;
 	int num_of_workes_finished = 0;
 	MPI_EXEC(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
+    // build datatypes: job, result, and cost update
 	MPI_Datatype job_type, cost_type, worker_res_type;
 	build_job_type(&job_type, citiesNum);
 	build_worker_res_type(&worker_res_type, citiesNum);
@@ -431,6 +446,7 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
 	Cost cost;
 	Res res;
 	int send_buffer_size = 0;
+    // prepare for send
 	MPI_EXEC(MPI_Pack_size(1, cost_type, MPI_COMM_WORLD, &send_buffer_size));
 	send_buffer_size += MPI_BSEND_OVERHEAD;
 	void* send_buffer = malloc(send_buffer_size * num_of_processes);
@@ -445,9 +461,11 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
 	int shortest_path[citiesNum];
 	bool visited[citiesNum];
 	bool received_new_job = false;
-
+    /* as long as the process is alive: calculate partial result using the given prefix, send the result to the master,
+     * send better results to the rest of the processes and repeat */
 	while (process_alive) {
 		if (job.is_valid) {
+            // prepare for branch and bound
 			current_bound = calc_initial_lower_bound(job.prefix, job.prefix_length, citiesNum, adj_matrix);
 			current_cost = calc_initial_cost(job.prefix_length, adj_matrix, job.prefix);
 			int tmp_cost = my_lowest_cost;
@@ -456,10 +474,11 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
 			for (int i = 0; i < job.prefix_length; i++) {
 				visited[job.prefix[i]] = true;
 			}
+            // calc partial result
 			branch_and_bound(citiesNum, job.prefix, job.prefix_length, current_bound, current_cost, visited,
 				adj_matrix, &tmp_cost, shortest_path);
 			num_of_workes_finished++;
-
+            // check if we found better result
 			checkForBetterResult(&my_lowest_cost);
 
 
@@ -478,15 +497,18 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
 				memmove(res.res_path, shortest_path, citiesNum * sizeof(int));
 			}
 			res.rank = rank;
+            // send my result to the master
 			MPI_EXEC(MPI_Ssend(&res, 1, worker_res_type, 0, TAG_WORKER_RES, MPI_COMM_WORLD));
 		}
+        // wait for new message
 		received_new_job = false;
 		while (!received_new_job) {
 			MPI_Status status;
 			MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 			switch (status.MPI_TAG) {
 			case TAG_NEW_BEST_COST:
-				MPI_EXEC(MPI_Recv(&cost, 1, cost_type, MPI_ANY_SOURCE, TAG_NEW_BEST_COST, MPI_COMM_WORLD, &status));
+                // update my best cost
+                MPI_EXEC(MPI_Recv(&cost, 1, cost_type, MPI_ANY_SOURCE, TAG_NEW_BEST_COST, MPI_COMM_WORLD, &status));
 				if (cost.cost < my_lowest_cost)
 				{
 					my_result_cost = INT_MAX;
@@ -494,15 +516,18 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
 				}
 				break;
 			case TAG_NEW_JOB:
+                // get new job and execute it
 				MPI_EXEC(MPI_Recv(&job, 1, job_type, 0, TAG_NEW_JOB, MPI_COMM_WORLD, &status));
 				received_new_job = true;
 				break;
 			case TAG_KILL:
+                // kill this process
 				MPI_EXEC(MPI_Recv(&job, 1, job_type, 0, TAG_KILL, MPI_COMM_WORLD, &status));
 				received_new_job = true;
 				process_alive = false;
 				break;
 			default:
+                // should not get here
 				MPI_EXEC(MPI_Recv(&cost, 1, cost_type, MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, &status));
 				job.is_valid = 0;
 				break;
@@ -512,6 +537,7 @@ void worker_func(int citiesNum, int **adj_matrix, int num_of_processes) {
 	free(send_buffer);
 }
 
+/* check if other process sent me better result */
 void checkForBetterResult(int *my_lowest_cost) {
 	MPI_Datatype cost_type;
 	build_cost_type(&cost_type);
@@ -519,6 +545,7 @@ void checkForBetterResult(int *my_lowest_cost) {
 	Cost cost;
 	MPI_Status status;
 	int is_available_flag;
+    // check if there is a message for me with new result tag
 	MPI_EXEC(MPI_Iprobe(MPI_ANY_SOURCE, TAG_NEW_BEST_COST, MPI_COMM_WORLD, &is_available_flag, &status));
 	while (is_available_flag) {
 		// somebody sent new best cost
@@ -527,10 +554,12 @@ void checkForBetterResult(int *my_lowest_cost) {
 			*my_lowest_cost = cost.cost;
 		}
 		is_available_flag = 0;
+        // check again maybe someone else sent me
 		MPI_EXEC(MPI_Iprobe(MPI_ANY_SOURCE, TAG_NEW_BEST_COST, MPI_COMM_WORLD, &is_available_flag, &status));
 	}
 }
 
+/* send my better result to the rest of the processes */
 void sendMyBetterResult(int rank, int num_of_processes, int my_lowest_cost, void *send_buffer, int send_buffer_size,
 	MPI_Datatype cost_type) {
 	typedef COST_STRUCT Cost;
@@ -542,10 +571,11 @@ void sendMyBetterResult(int rank, int num_of_processes, int my_lowest_cost, void
 			continue;
 		}
 		void* curr_buffer = cost_ptr + i;
-		MPI_Buffer_detach(&(curr_buffer), &send_buffer_size);
+        // send and return as soon as possible, so use buffer
 		MPI_EXEC(MPI_Buffer_attach(curr_buffer, send_buffer_size));
-		MPI_EXEC(MPI_Bsend(&cost, 1, cost_type, i, TAG_NEW_BEST_COST, MPI_COMM_WORLD));
-	}
+        MPI_EXEC(MPI_Bsend(&cost, 1, cost_type, i, TAG_NEW_BEST_COST, MPI_COMM_WORLD));
+        MPI_EXEC(MPI_Buffer_detach(&(curr_buffer), &send_buffer_size));
+    }
 }
 
 /* calculates the number if prefixes according to the number of cities */
@@ -581,6 +611,7 @@ int calc_length_of_prefix(int citiesNum, int num_of_processes) {
 	return result;
 }
 
+/* build better cost datatype */
 void build_cost_type(MPI_Datatype *cost_type) {
 	typedef COST_STRUCT Cost;
 	Cost cost;
@@ -603,6 +634,7 @@ void build_cost_type(MPI_Datatype *cost_type) {
 	MPI_EXEC(MPI_Type_commit(cost_type));
 }
 
+/* calculate the cost of the given prefix */
 int calc_initial_cost(int prefix_length, int **adj_mat, int *prefix) {
 	int cost = 0;
 	for (int i = 0; i < prefix_length - 1; i++) {
